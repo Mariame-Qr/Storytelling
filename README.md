@@ -20,7 +20,7 @@ User Query → Orchestrator → Storyteller → Audio Narration
                                 ↓
                         Replicate API (SDXL + SVD)
                                 ↓
-                        Cinematic Video (5-10s)
+                        Cinematic Video (20-25s)
                                 ↓
                         Merge Audio + Video
                                 ↓
