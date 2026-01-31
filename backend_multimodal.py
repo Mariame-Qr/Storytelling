@@ -1,11 +1,19 @@
 """
-AutoStory Multimodal Backend - Advanced Agentic Orchestration System
-CrewAI-based intelligent automotive storytelling with multimodal generation
+AutoStory Multimodal Backend - Replicate Direct Workflow
+CrewAI-based intelligent automotive storytelling with direct video generation
+
+ARCHITECTURE:
+User Query → Orchestrator → Storyteller → Audio
+                                ↓
+                        Replicate API (Direct Video)
+                                ↓
+                        Merge Audio + Video
+                                ↓
+                        Final Narrated MP4
 """
 
 import os
 import time
-import json
 import requests
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -19,7 +27,6 @@ from pydantic import BaseModel, Field
 
 # Audio processing
 from gtts import gTTS
-import speech_recognition as sr
 import replicate
 
 # Video processing - moviepy 2.x uses different import structure
@@ -180,48 +187,7 @@ class SearchManualTool(BaseTool):
             return f"Error searching manual: {str(e)}"
 
 
-class SearchVideoLibraryInput(BaseModel):
-    """Input schema for SearchVideoLibraryTool"""
-    feature_name: str = Field(..., description="Name of automotive feature to search for")
 
-
-class SearchVideoLibraryTool(BaseTool):
-    """Tool to search for existing automotive videos in the library"""
-    name: str = "Search Video Library"
-    description: str = """
-    Searches the video library for existing automotive videos matching the requested feature.
-    Use this tool to find reusable video content before generating new videos.
-    Input should be the name of the automotive feature or system.
-    Returns path to video file if found, or None if no match.
-    """
-    args_schema: type[BaseModel] = SearchVideoLibraryInput
-    model_config = {"arbitrary_types_allowed": True}
-    
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-    
-    def _run(self, feature_name: str) -> str:
-        """Search for existing videos matching the feature"""
-        try:
-            print(f"\n🔍 Searching video library for: {feature_name}")
-            
-            # Search in video library directory
-            video_extensions = ['.mp4', '.avi', '.mov', '.mkv']
-            feature_keywords = feature_name.lower().split()
-            
-            for video_file in VIDEO_LIBRARY.glob("*"):
-                if video_file.suffix.lower() in video_extensions:
-                    video_name = video_file.stem.lower()
-                    # Check if any keyword matches
-                    if any(keyword in video_name for keyword in feature_keywords):
-                        print(f"✓ Found matching video: {video_file.name}")
-                        return str(video_file.absolute())
-            
-            print("⚠ No matching video found in library")
-            return "No matching video found"
-            
-        except Exception as e:
-            return f"Error searching video library: {str(e)}"
 
 
 class GenerateNarrationInput(BaseModel):
@@ -511,60 +477,7 @@ class MergeAudioVideoTool(BaseTool):
             return None
 
 
-class CreateVideoFromImageInput(BaseModel):
-    """Input schema for CreateVideoFromImageTool"""
-    image_path: str = Field(..., description="Path to image file")
-    duration: int = Field(default=5, description="Duration in seconds")
 
-
-class CreateVideoFromImageTool(BaseTool):
-    """Tool for creating a video from a static image"""
-    name: str = "Create Video from Image"
-    description: str = """
-    Creates a video clip from a static image with specified duration.
-    Use this tool when you need to convert an image into a video format.
-    Returns path to generated video file.
-    """
-    args_schema: type[BaseModel] = CreateVideoFromImageInput
-    model_config = {"arbitrary_types_allowed": True}
-    
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-    
-    def _run(self, image_path: str, duration: int = 5) -> str:
-        """Create video from image using moviepy"""
-        try:
-            print(f"\n🎥 Creating video from image...")
-            print(f"Image: {image_path}")
-            print(f"Duration: {duration}s")
-            
-            # Validate image path
-            if not image_path or image_path.startswith("Error") or not Path(image_path).exists():
-                print(f"⚠ Invalid image path: {image_path}")
-                return None
-            
-            # Create image clip
-            image_clip = ImageClip(image_path).set_duration(duration)
-            
-            # Export
-            timestamp = int(time.time())
-            output_path = OUTPUT_DIR / f"image_video_{timestamp}.mp4"
-            
-            image_clip.write_videofile(
-                str(output_path),
-                fps=24,
-                codec='libx264',
-                verbose=False,
-                logger=None
-            )
-            
-            image_clip.close()
-            
-            print(f"✓ Video created: {output_path}")
-            return str(output_path.absolute())
-            
-        except Exception as e:
-            return f"Error creating video from image: {str(e)}"
 
 
 # ============================================================================
@@ -578,67 +491,30 @@ def create_orchestrator_agent() -> Agent:
     return Agent(
         role="Multimodal AI Orchestrator",
         goal="""
-        Analyze user requests and decide the optimal multimodal generation strategy.
-        Make intelligent decisions about:
-        - Whether to use existing videos or generate new content
-        - Whether to generate images, videos, or text only
-        - Whether audio narration is needed
-        - The complete execution pipeline
-        
-        Your decisions must be explicit, traceable, and logged.
+        Analyze user requests and coordinate the multimodal generation workflow.
+        Decide which modalities to generate based on user preferences.
+        Ensure smooth execution of the generation pipeline.
         """,
         backstory="""
         You are the master orchestrator of the AutoStory multimodal system.
-        You have complete understanding of:
-        - User intent classification
-        - Content reusability assessment
-        - Multimodal generation capabilities
-        - Cost-benefit analysis of generation vs reuse
         
-        You follow this decision framework:
+        WORKFLOW ARCHITECTURE:
+        User Query → Orchestrator → Storyteller → Audio
+                                         ↓
+                                 Replicate API (Direct Video)
+                                         ↓
+                                 Merge Audio + Video
         
-        DECISION PIPELINE:
+        EXECUTION STRATEGY:
+        1. Generate story text (Storyteller)
+        2. Generate audio narration (Audio Agent)
+        3. Generate video directly with Replicate API (Creative Director)
+        4. Merge audio + video (Video Assembly)
+        5. Output final narrated MP4
         
-        1. ANALYZE USER INTENT
-           - Extract requested automotive feature
-           - Determine if dynamic (motion) or static
-           - Assess complexity and visual requirements
-        
-        2. CHECK EXISTING RESOURCES
-           - Search video library first
-           - If suitable video found → REUSE PATH
-           - If no video found → GENERATION PATH
-        
-        3. DECIDE MODALITIES
-           - TEXT: Always generate story
-           - IMAGE: For static features or fallback
-           - VIDEO: For dynamic mechanisms
-           - AUDIO: For narration (user preference or default)
-        
-        4. EXECUTION STRATEGY
-           CASE A - EXISTING VIDEO + NARRATION:
-             1. Use found video
-             2. Generate story text
-             3. Generate audio narration
-             4. Merge audio + video
-             5. Output final narrated MP4
-           
-           CASE B - GENERATE NEW CONTENT:
-             1. Generate story text
-             2. Generate image
-             3. Convert image to video OR generate video
-             4. Generate audio narration
-             5. Merge audio + video
-             6. Output final narrated MP4
-           
-           CASE C - TEXT ONLY:
-             1. Generate story text
-             2. Optionally generate audio
-             3. Output text + audio
-        
-        You ALWAYS log your decision reasoning clearly.
+        You coordinate all agents and ensure the pipeline executes smoothly.
         """,
-        tools=[SearchVideoLibraryTool()],
+        tools=[],
         llm=llm,
         verbose=True,
         allow_delegation=True
@@ -726,23 +602,24 @@ def create_creative_director_agent() -> Agent:
         role="Cinematic AI Director",
         goal="""
         Generate high-quality cinematic videos for automotive features using Replicate API.
-        Create dynamic video content that accurately represents automotive systems in motion.
+        Create dynamic video content directly showing automotive systems in motion.
         Ensure professional cinematography, visual quality and technical accuracy.
         """,
         backstory="""
         You are an expert cinematic director specializing in automotive video production.
-        You create:
-        - Professional cinematic automotive videos using Replicate AI
+        
+        You generate videos directly with Replicate API:
+        - Professional cinematic automotive videos (5-10 seconds)
         - Dynamic shots showing mechanical systems in action
         - High-quality video content with smooth camera movements
+        - Intelligent prompt enhancement for better results
         
         You ensure all videos are:
         - Technically accurate representations of automotive systems
         - Cinematically compelling with professional camera work
         - Optimized for viewer engagement and clarity
-        - Appropriate for the automotive feature being demonstrated
         """,
-        tools=[GenerateVideoWithReplicateTool(), CreateVideoFromImageTool()],
+        tools=[GenerateVideoWithReplicateTool()],
         llm=llm,
         verbose=True,
         allow_delegation=False
@@ -813,41 +690,28 @@ def run_autostory_multimodal_crew(user_query: str, format_preference: str = "ful
     # TASK 1: Orchestration Decision
     orchestration_task = Task(
         description=f"""
-        Analyze the user request and decide the multimodal generation strategy.
+        Analyze the user request and coordinate the multimodal generation workflow.
         
         USER REQUEST: {user_query}
         FORMAT PREFERENCE: {format_preference}
         AUDIO ENABLED: {audio_enabled}
-        IMAGE ENABLED: {image_enabled}
         VIDEO ENABLED: {video_enabled}
         
-        Follow this decision pipeline:
+        WORKFLOW:
+        1. Extract automotive feature from query
+        2. Coordinate story generation
+        3. Coordinate audio generation (if enabled)
+        4. Coordinate video generation with Replicate (if enabled)
+        5. Coordinate audio+video merge
         
-        STEP 1: ANALYZE INTENT
-        - Extract automotive feature name
-        - Determine if dynamic (moving parts) or static
-        - Assess visual complexity
-        
-        STEP 2: CHECK VIDEO LIBRARY
-        - Use "Search Video Library" tool to find existing videos
-        - If found: note video path for reuse
-        - If not found: mark for generation
-        
-        STEP 3: DECIDE STRATEGY
-        Output a JSON decision with:
+        Output a simple coordination plan:
         {{
-            "intent_classification": "DYNAMIC_MECHANISM | STATIC_FEATURE | INFORMATIONAL",
             "feature_name": "extracted feature name",
-            "video_found": true/false,
-            "video_path": "path or null",
-            "strategy": "REUSE_VIDEO | GENERATE_NEW | TEXT_ONLY",
-            "modalities": ["TEXT", "IMAGE", "VIDEO", "AUDIO"],
-            "reasoning": "explanation of decision"
+            "modalities": ["TEXT", "AUDIO", "VIDEO"],
+            "strategy": "GENERATE_DIRECT"
         }}
-        
-        CRITICAL: Output ONLY the JSON decision.
         """,
-        expected_output="JSON decision object with complete strategy",
+        expected_output="Simple coordination plan for multimodal generation",
         agent=orchestrator
     )
     
@@ -907,89 +771,50 @@ def run_autostory_multimodal_crew(user_query: str, format_preference: str = "ful
     
     result = crew.kickoff()
     
-    # Parse orchestration decision
-    try:
-        decision_output = str(orchestration_task.output.raw)
-        print(f"\n📋 ORCHESTRATION DECISION:\n{decision_output}\n")
-        
-        # Try to parse JSON
-        if "{" in decision_output:
-            json_str = decision_output[decision_output.find("{"):decision_output.rfind("}")+1]
-            decision = json.loads(json_str)
-        else:
-            decision = {
-                "strategy": "GENERATE_NEW",
-                "modalities": ["TEXT", "IMAGE", "AUDIO"],
-                "video_found": False
-            }
-    except:
-        decision = {
-            "strategy": "GENERATE_NEW",
-            "modalities": ["TEXT", "IMAGE", "AUDIO"],
-            "video_found": False
-        }
-    
     # Extract story
     story_text = str(story_task.output.raw)
     
-    # EXECUTE STRATEGY
+    # EXECUTE WORKFLOW
     final_outputs = {
         "success": True,
         "story": story_text,
-        "decision": decision,
-        "strategy": decision.get("strategy", "GENERATE_NEW"),
+        "strategy": "GENERATE_DIRECT",
         "outputs": {}
     }
     
-    # GENERATE AUDIO (if enabled)
+    # STEP 1: GENERATE AUDIO (if enabled)
     audio_path = None
     if audio_enabled:
+        print("\n🎤 STEP 1: Generating audio narration...")
         narration_tool = GenerateNarrationTool()
         audio_path = narration_tool._run(story_text, language="en")
         if audio_path and not audio_path.startswith("Error"):
             final_outputs["outputs"]["audio"] = audio_path
+            print(f"✓ Audio generated: {audio_path}")
     
-    # Handle video/image generation based on strategy and preference
-    if decision.get("video_found") and decision.get("video_path") and video_enabled:
-        # REUSE EXISTING VIDEO
-        video_path = decision["video_path"]
-        final_outputs["outputs"]["video"] = video_path
+    # STEP 2: GENERATE VIDEO WITH REPLICATE (if enabled)
+    video_path = None
+    if video_enabled:
+        print("\n🎬 STEP 2: Generating video with Replicate API...")
+        # Generate intelligent visual prompt from story
+        visual_prompt = generate_visual_prompt_from_story(story_text, user_query)
+        print(f"🎨 Visual prompt: {visual_prompt}")
         
-        # Merge with audio if available
-        if audio_path and audio_path != "Error generating narration:":
-            merge_tool = MergeAudioVideoTool()
-            final_video = merge_tool._run(video_path, audio_path)
-            final_outputs["outputs"]["final_video"] = final_video
+        video_tool = GenerateVideoWithReplicateTool()
+        video_path = video_tool._run(visual_prompt)
+        
+        if video_path and not video_path.startswith("Error") and os.path.exists(video_path):
+            final_outputs["outputs"]["video"] = video_path
+            print(f"✓ Video generated: {video_path}")
     
-    else:
-        # GENERATE NEW CONTENT WITH REPLICATE
-        
-        # Generate video directly with Replicate if needed
-        if video_enabled:
-            # Créer un prompt visuel intelligent basé sur l'histoire
-            visual_prompt = generate_visual_prompt_from_story(story_text, user_query)
-            print(f"\n🎨 Visual prompt généré: {visual_prompt[:120]}...")
-            
-            video_tool = GenerateVideoWithReplicateTool()
-            video_path = video_tool._run(visual_prompt)
-            
-            if video_path and os.path.exists(video_path):
-                final_outputs["outputs"]["video"] = video_path
-                
-                # Merge with audio narration
-                if audio_path and not audio_path.startswith("Error"):
-                    merge_tool = MergeAudioVideoTool()
-                    final_video = merge_tool._run(video_path, audio_path)
-                    if final_video and os.path.exists(final_video):
-                        final_outputs["outputs"]["final_video"] = final_video
-        
-        # If only image is requested (no video), create a placeholder
-        elif image_enabled:
-            print("⚠️ Image-only mode not supported with Replicate. Generating placeholder video instead.")
-            video_tool = GenerateVideoWithReplicateTool()
-            video_path = video_tool._create_placeholder_video(user_query)
-            if video_path:
-                final_outputs["outputs"]["video"] = video_path
+    # STEP 3: MERGE AUDIO + VIDEO (if both available)
+    if audio_path and video_path and not audio_path.startswith("Error") and not video_path.startswith("Error"):
+        print("\n🎞️ STEP 3: Merging audio and video...")
+        merge_tool = MergeAudioVideoTool()
+        final_path = merge_tool._run(video_path, audio_path)
+        if final_path and os.path.exists(final_path):
+            final_outputs["outputs"]["final_video"] = final_path
+            print(f"✓ Final video created: {final_path}")
     
     execution_time = time.time() - start_time
     final_outputs["execution_time"] = execution_time
