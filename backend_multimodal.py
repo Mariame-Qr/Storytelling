@@ -29,6 +29,9 @@ from pydantic import BaseModel, Field
 from gtts import gTTS
 import replicate
 
+# Image processing
+from PIL import Image, ImageDraw, ImageFont
+
 # Video processing - moviepy 2.x uses different import structure
 try:
     from moviepy import VideoFileClip, AudioFileClip, ImageClip
@@ -679,6 +682,25 @@ def run_autostory_multimodal_crew(user_query: str, format_preference: str = "ful
     image_enabled = format_preference in ["full", "image"]
     video_enabled = format_preference in ["full", "video"]
     
+    # Try CrewAI workflow first, with fallback on quota errors
+    try:
+        return _execute_crewai_workflow(user_query, format_preference, audio_enabled, video_enabled)
+    except Exception as e:
+        error_msg = str(e)
+        print(f"\n⚠️ CrewAI workflow failed: {error_msg}")
+        
+        # Check if it's a quota error
+        if "quota" in error_msg.lower() or "429" in error_msg or "rate" in error_msg.lower():
+            print("\n🎤 Generating audio-only fallback with static image...\n")
+            return _generate_audio_fallback(user_query, format_preference, audio_enabled, video_enabled)
+        else:
+            raise
+
+
+def _execute_crewai_workflow(user_query: str, format_preference: str, audio_enabled: bool, video_enabled: bool) -> Dict[str, Any]:
+    """Execute the full CrewAI workflow"""
+    image_enabled = format_preference in ["full", "image"]
+    
     # Create agents
     orchestrator = create_orchestrator_agent()
     technical_expert = create_technical_expert_agent()
@@ -830,46 +852,259 @@ def run_autostory_multimodal_crew(user_query: str, format_preference: str = "ful
     return final_outputs
 
 
+def _generate_audio_fallback(user_query: str, format_preference: str, audio_enabled: bool, video_enabled: bool) -> Dict[str, Any]:
+    """
+    Generate audio-only fallback with static image when LLM quota is exceeded
+    """
+    print("\n" + "=" * 80)
+    print("🎤 AUDIO FALLBACK MODE - LLM Quota Exceeded")
+    print("=" * 80)
+    
+    start_time = time.time()
+    
+    # Generate a generic but relevant story based on common automotive queries
+    story_text = f"""Understanding {user_query}
+
+This is an advanced automotive feature that plays a crucial role in modern vehicles. While specific technical details require our AI agents, let me provide you with essential information about this system.
+
+This automotive technology represents years of engineering innovation, designed to enhance your driving experience through improved performance, safety, and efficiency. The system works continuously in the background, making intelligent decisions to optimize vehicle behavior.
+
+Modern vehicles integrate sophisticated sensors and control units that monitor and adjust this feature in real-time. Whether you're driving on highways, city streets, or challenging terrains, this technology adapts to provide optimal performance.
+
+The engineering behind this system combines mechanical precision with electronic intelligence, ensuring reliability and responsiveness when you need it most. It's one of many innovations that make today's vehicles safer and more capable than ever before."""
+
+    final_outputs = {
+        "success": True,
+        "story": story_text,
+        "strategy": "AUDIO_FALLBACK",
+        "outputs": {},
+        "quota_exceeded": True
+    }
+    
+    # Use single timestamp for all files
+    timestamp = int(time.time())
+    
+    # STEP 1: Generate Audio
+    if audio_enabled or format_preference in ["full", "audio"]:
+        print("\n🎤 Generating audio narration...")
+        try:
+            narration_tool = GenerateNarrationTool()
+            audio_path = narration_tool._run(story_text, language="en")
+            if audio_path and not audio_path.startswith("Error"):
+                final_outputs["outputs"]["audio"] = audio_path
+                print(f"✓ Audio generated: {audio_path}")
+        except Exception as e:
+            print(f"⚠️ Audio generation failed: {e}")
+    
+    # STEP 2: Generate Static Image & Video with same naming convention
+    if format_preference in ["full", "image", "video"]:
+        print("\n🖼️ Creating static automotive image...")
+        try:
+            # Create professional automotive themed image
+            img = Image.new('RGB', (1920, 1080), color=(20, 25, 40))
+            draw = ImageDraw.Draw(img)
+            
+            # Gradient background
+            for y in range(1080):
+                gradient_color = int(20 + (y / 1080) * 30)
+                draw.line([(0, y), (1920, y)], fill=(gradient_color, gradient_color + 10, gradient_color + 20))
+            
+            # Load fonts
+            try:
+                title_font = ImageFont.truetype("arial.ttf", 90)
+                subtitle_font = ImageFont.truetype("arial.ttf", 45)
+                text_font = ImageFont.truetype("arial.ttf", 32)
+            except:
+                title_font = ImageFont.load_default()
+                subtitle_font = title_font
+                text_font = title_font
+            
+            # Title
+            draw.text((960, 200), "🚗 AutoStory AI", fill=(100, 180, 255), font=title_font, anchor="mm")
+            draw.text((960, 300), "Automotive Intelligence", fill=(150, 200, 240), font=subtitle_font, anchor="mm")
+            
+            # User query
+            draw.text((960, 450), "Votre Question:", fill=(180, 190, 200), font=text_font, anchor="mm")
+            
+            # Wrap query text
+            query_lines = [user_query[i:i+60] for i in range(0, len(user_query), 60)]
+            y_pos = 520
+            for line in query_lines[:3]:
+                draw.text((960, y_pos), line, fill=(220, 230, 240), font=text_font, anchor="mm")
+                y_pos += 50
+            
+            # Status message
+            draw.text((960, 750), "🎤 Audio Narration Disponible", fill=(100, 255, 150), font=subtitle_font, anchor="mm")
+            draw.text((960, 850), "Mode Fallback - Quota LLM Dépassé", fill=(255, 180, 100), font=text_font, anchor="mm")
+            
+            # Footer
+            draw.text((960, 980), "Écoutez l'audio ci-dessous • Version démo", fill=(120, 140, 160), font=text_font, anchor="mm")
+            
+            # Save image with timestamp
+            img_path = OUTPUT_DIR / f"fallback_image_{timestamp}.png"
+            img.save(img_path, quality=95)
+            
+            final_outputs["outputs"]["image"] = str(img_path.absolute())
+            print(f"✓ Static image created: {img_path}")
+            
+            # Convert to video if requested
+            if format_preference in ["full", "video"]:
+                print("\n🎬 Converting image to video...")
+                try:
+                    # Use same naming as narrated video for consistency
+                    video_path = OUTPUT_DIR / f"narrated_video_{timestamp}.mp4"
+                    img_clip = ImageClip(str(img_path), duration=10)
+                    
+                    # If audio exists, merge directly
+                    if "audio" in final_outputs["outputs"]:
+                        print("🎞️ Merging audio with static video...")
+                        audio_clip = AudioFileClip(final_outputs["outputs"]["audio"])
+                        
+                        # Adjust video duration to match audio
+                        video_duration = audio_clip.duration
+                        img_clip = img_clip.with_duration(video_duration)
+                        final_clip = img_clip.with_audio(audio_clip)
+                        
+                        final_clip.write_videofile(
+                            str(video_path),
+                            fps=24,
+                            codec='libx264',
+                            audio_codec='aac',
+                            logger=None
+                        )
+                        
+                        final_clip.close()
+                        audio_clip.close()
+                        
+                        final_outputs["outputs"]["final_video"] = str(video_path.absolute())
+                        print(f"✓ Final narrated video: {video_path}")
+                    else:
+                        # No audio, just save static video
+                        img_clip.write_videofile(
+                            str(video_path),
+                            fps=24,
+                            codec='libx264',
+                            logger=None
+                        )
+                        img_clip.close()
+                        
+                        final_outputs["outputs"]["video"] = str(video_path.absolute())
+                        print(f"✓ Static video created: {video_path}")
+                            
+                except Exception as e:
+                    print(f"⚠️ Video creation failed: {e}")
+                    
+        except Exception as e:
+            print(f"⚠️ Image generation failed: {e}")
+    
+    execution_time = time.time() - start_time
+    final_outputs["execution_time"] = execution_time
+    
+    print("\n" + "=" * 80)
+    print("✅ AUDIO FALLBACK COMPLETED")
+    print("=" * 80)
+    print(f"Execution time: {execution_time:.2f} seconds")
+    print(f"Outputs: {list(final_outputs['outputs'].keys())}")
+    print("=" * 80 + "\n")
+    
+    return final_outputs
+
+
 # ============================================================================
-# TESTING
+# TESTING & INTERACTIVE MODE
 # ============================================================================
 
 if __name__ == "__main__":
-    test_query = "Explain how the all-wheel drive system distributes torque"
-    
-    # Try full workflow first, fallback to audio-only if it fails
-    try:
-        result = run_autostory_multimodal_crew(test_query, format_preference="audio")
-    except Exception as e:
-        print(f"\n⚠️ Full workflow failed: {e}")
-        print("\n🎤 Generating audio-only fallback...\n")
-        
-        # Fallback: Generate audio directly
-        story_text = f"""The all-wheel drive system is an advanced automotive technology that intelligently distributes engine torque between the front and rear axles to optimize traction and handling. 
-
-When the vehicle accelerates, sensors continuously monitor wheel speed and traction conditions. The system uses a center differential or electronic coupling to split power between the axles. Under normal driving, torque is distributed evenly, typically 50-50 front to rear.
-
-However, when sensors detect wheel slip on one axle, the system rapidly redirects more torque to the axle with better grip. This happens in milliseconds through electronic control units that manage clutch packs or electromagnetic couplings.
-
-In challenging conditions like snow or mud, the all-wheel drive system can send up to 100 percent of available torque to the wheels with the most traction, ensuring maximum forward momentum and vehicle stability."""
-
-        narration_tool = GenerateNarrationTool()
-        audio_path = narration_tool._run(story_text, language="en")
-        
-        result = {
-            "success": True,
-            "story": story_text,
-            "outputs": {"audio": audio_path},
-            "strategy": "AUDIO_FALLBACK",
-            "execution_time": 0
-        }
-    
     print("\n" + "=" * 80)
-    print("FINAL OUTPUTS")
+    print("🚗 AUTOSTORY MULTIMODAL - INTERACTIVE MODE")
     print("=" * 80)
-    print(f"\n📖 STORY:\n{result.get('story', 'No story generated')}\n")
-    print("-" * 80)
-    for key, value in result.items():
-        if key not in ["technical_specs", "story", "decision"]:
-            print(f"{key}: {value}")
-    print("=" * 80)
+    print("\nDernière Architecture:")
+    print("  User Query → Orchestrator → Storyteller → Audio")
+    print("                                    ↓")
+    print("                            Replicate API (SDXL + SVD)")
+    print("                                    ↓")
+    print("                            Merge Audio + Video")
+    print("                                    ↓")
+    print("                          Final Narrated MP4")
+    print("\nMode Fallback: Audio + Image Statique si quota épuisé")
+    print("=" * 80 + "\n")
+    
+    # Get user input
+    user_query = input("📝 Entrez votre requête automobile (ou appuyez sur Entrée pour exemple): ").strip()
+    
+    if not user_query:
+        user_query = "Explain how the all-wheel drive system distributes torque"
+        print(f"   → Utilisation de l'exemple: '{user_query}'")
+    
+    # Always use Full format (Audio + Video)
+    format_pref = "full"
+    print("\n📊 Format: Full (Audio + Vidéo)")
+    print("🚀 Lancement du workflow...\n")
+    
+    # Execute workflow with full error handling
+    try:
+        result = run_autostory_multimodal_crew(user_query, format_preference=format_pref)
+        
+        # Display comprehensive results
+        print("\n" + "=" * 80)
+        print("✅ RÉSULTATS FINAUX")
+        print("=" * 80)
+        
+        # Story
+        print(f"\n📖 HISTOIRE GÉNÉRÉE:")
+        print("-" * 80)
+        print(result.get('story', 'Aucune histoire générée'))
+        print("-" * 80)
+        
+        # Outputs
+        print(f"\n📁 FICHIERS GÉNÉRÉS:")
+        outputs = result.get('outputs', {})
+        
+        if outputs:
+            for output_type, output_path in outputs.items():
+                if output_path and os.path.exists(output_path):
+                    file_size = os.path.getsize(output_path) / 1024  # KB
+                    print(f"  ✓ {output_type.upper():12} : {output_path} ({file_size:.1f} KB)")
+                else:
+                    print(f"  ✗ {output_type.upper():12} : Non généré")
+        else:
+            print("  Aucun fichier généré")
+        
+        # Metadata
+        print(f"\n📊 MÉTADONNÉES:")
+        print(f"  Stratégie    : {result.get('strategy', 'N/A')}")
+        print(f"  Succès       : {result.get('success', False)}")
+        print(f"  Temps exec.  : {result.get('execution_time', 0):.2f}s")
+        
+        if result.get('quota_exceeded'):
+            print(f"  ⚠️ QUOTA LLM : ÉPUISÉ - Mode fallback activé")
+            print(f"     → Audio généré avec gTTS")
+            print(f"     → Image statique créée")
+            if 'final_video' in outputs or 'video' in outputs:
+                print(f"     → Vidéo statique disponible (10s)")
+        
+        # Visual output info
+        if 'video' in outputs or 'final_video' in outputs or 'image' in outputs:
+            print(f"\n🎬 CONTENU VISUEL:")
+            if 'final_video' in outputs:
+                print(f"  Type         : Vidéo complète avec audio")
+                print(f"  Fichier      : {outputs['final_video']}")
+            elif 'video' in outputs:
+                print(f"  Type         : Vidéo seule (sans audio)")
+                print(f"  Fichier      : {outputs['video']}")
+            elif 'image' in outputs:
+                print(f"  Type         : Image statique")
+                print(f"  Fichier      : {outputs['image']}")
+        
+        print("\n" + "=" * 80 + "\n")
+        
+    except Exception as e:
+        print("\n" + "=" * 80)
+        print("❌ ERREUR CRITIQUE")
+        print("=" * 80)
+        print(f"Type: {type(e).__name__}")
+        print(f"Message: {str(e)}")
+        print("\nLe workflow a échoué complètement.")
+        print("Vérifiez vos clés API et quotas.")
+        print("=" * 80 + "\n")
+        raise
